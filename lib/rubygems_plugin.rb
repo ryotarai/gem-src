@@ -1,8 +1,51 @@
 require 'rubygems'
 require 'net/https'
+require 'fileutils'
+require 'json'
 
 module Gem
   class Src
+    class Repository
+      def self.tested_urls
+        @tested_urls ||= []
+      end
+
+      def initialize(url)
+        @url = url
+      end
+
+      def git_clone(clone_dir)
+        return if @url.nil? || @url.empty?
+        return if self.class.tested_urls.include?(@url)
+        self.class.tested_urls << @url
+        return if github? && !github_page_exists?
+
+        if use_ghq?
+          system 'ghq', 'get', @url
+        else
+          system 'git', 'clone', @url, clone_dir if git?
+        end
+      end
+
+      private
+
+      def github?
+        URI.parse(@url).host == 'github.com'
+      end
+
+      def github_page_exists?
+        Net::HTTP.new('github.com', 443).tap {|h| h.use_ssl = true }.request_head(@url).code != '404'
+      end
+
+      def git?
+        !`git ls-remote #{@url} 2> /dev/null`.empty?
+      end
+
+      def use_ghq?
+        ENV['GEMSRC_USE_GHQ'] || Gem.configuration[:gemsrc_use_ghq]
+      end
+    end
+    
     attr_reader :installer
 
     def initialize(installer)
@@ -34,18 +77,6 @@ module Gem
       end
     end
 
-    def git?(url)
-      !`git ls-remote #{url} 2> /dev/null`.empty?
-    end
-
-    def github?(url)
-      URI.parse(url).host == 'github.com'
-    end
-
-    def github_page_exists?(url)
-      Net::HTTP.new('github.com', 443).tap {|h| h.use_ssl = true }.request_head(url).code != '404'
-    end
-
     def api
       require 'open-uri'
       @api ||= open("http://rubygems.org/api/v1/gems/#{installer.spec.name}.yaml", &:read)
@@ -65,31 +96,41 @@ module Gem
       "https://github.com/#{name}/#{name}"
     end
 
-    def git_clone(repository)
-      return if repository.nil? || repository.empty?
-      return if @tested_repositories.include? repository
-      @tested_repositories << repository
-      return if github?(repository) && !github_page_exists?(repository)
-
-      if use_ghq?
-        system 'ghq', 'get', repository
-      else
-        system 'git', 'clone', repository, clone_dir if git?(repository)
-      end
-    end
-
-    def use_ghq?
-      ENV['GEMSRC_USE_GHQ'] || Gem.configuration[:gemsrc_use_ghq]
+    def async_mode?
+      ENV['GEMSRC_ASYNC'] || Gem.configuration[:gemsrc_async]
     end
 
     def git_clone_homepage_or_source_code_uri_or_homepage_uri_or_github_organization_uri
       return false if File.exist? clone_dir
-      git_clone(installer.spec.homepage) ||
-        git_clone(github_url(installer.spec.homepage)) ||
-        git_clone(source_code_uri) ||
-        git_clone(homepage_uri) ||
-        git_clone(github_url(homepage_uri)) ||
-        git_clone(github_organization_uri(installer.spec.name))
+
+      candidates = [
+        installer.spec.homepage,
+        github_url(installer.spec.homepage),
+        source_code_uri,
+        homepage_uri,
+        github_url(homepage_uri),
+        github_organization_uri(installer.spec.name),
+      ]
+
+      if async_mode?
+        open(queue_file_path, 'w') do |f|
+          f.write JSON.dump({
+            'name' => installer.spec.name,
+            'clone_dir' => clone_dir,
+            'candidates' => candidates,
+          })
+        end
+      else
+        candidates.each do |candidate|
+          break if Repository.new(candidate).git_clone(clone_dir)
+        end
+      end
+    end
+
+    def queue_file_path
+      dir = File.expand_path('~/.gem-src-queue')
+      FileUtils.mkdir_p(dir)
+      File.join(dir, "#{Time.now.to_i}_#{installer.spec.name}.json")
     end
 
     def api_uri_for(key)

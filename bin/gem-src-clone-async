@@ -1,0 +1,17 @@
+#!/usr/bin/env ruby
+
+require 'json'
+require 'fileutils'
+require File.expand_path('../../lib/rubygems_plugin.rb', __FILE__)
+
+dir = File.expand_path('~/.gem-src-queue')
+Dir.glob(File.join(dir, '*')) do |path|
+  queue = JSON.parse(File.read(path))
+  puts "Cloning #{queue['name']}..."
+  queue['candidates'].each do |candidate|
+    break if Gem::Src::Repository.new(candidate).
+      git_clone(queue['clone_dir'])
+  end
+  FileUtils.rm(path)
+end
+
